@@ -475,8 +475,8 @@ const handler = createMcpHandler(
     )
 
     // Tool 6: Lookup GCLID
-    // Constraints: explicit date range only; segments.ad_network_type not click_view.ad_network_type;
-    // conversion metrics cannot be selected alongside click_view
+    // Constraints: click_view requires EXACTLY one day filter; segments.ad_network_type 
+    // not click_view.ad_network_type; conversion metrics cannot be selected alongside click_view
     server.tool(
       'lookup_gclid',
       'Look up a specific gclid to check if the click was registered and get its campaign/ad group details.',
@@ -485,47 +485,52 @@ const handler = createMcpHandler(
         days:  z.number().default(30).describe('Lookback window in days'),
       },
       async ({ gclid, days = 30 }) => {
-        const { start, end } = dateRange(days)
+        // click_view requires segments.date filter on EXACTLY one day per request.
+        // We loop backwards from today until we find it or exhaust the window.
+        for (let i = 0; i <= days; i++) {
+          const day = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10)
+          
+          const rows = await gaql(`
+            SELECT
+              click_view.gclid,
+              campaign.name,
+              ad_group.name,
+              segments.date,
+              segments.ad_network_type
+            FROM click_view
+            WHERE click_view.gclid = '${gclid}'
+              AND segments.date BETWEEN '${day}' AND '${day}'
+            LIMIT 1
+          `)
 
-        const rows = await gaql(`
-          SELECT
-            click_view.gclid,
-            campaign.name,
-            ad_group.name,
-            segments.date,
-            segments.ad_network_type
-          FROM click_view
-          WHERE click_view.gclid = '${gclid}'
-            AND segments.date BETWEEN '${start}' AND '${end}'
-        `)
+          if (rows.length > 0) {
+            const row      = rows[0]
+            const campaign = String(pick(row, 'campaign.name')          ?? 'Unknown')
+            const adGroup  = String(pick(row, 'adGroup.name')           ?? 'Unknown')
+            const date     = String(pick(row, 'segments.date')          ?? 'Unknown')
+            const network  = String(pick(row, 'segments.adNetworkType') ?? 'Unknown')
 
-        if (!rows.length) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `GCLID not found: ${gclid}\n\nNot registered in the last ${days} days.`,
-            }],
+            return {
+              content: [{
+                type: 'text' as const,
+                text: [
+                  `GCLID Found ✓`,
+                  divider(),
+                  `GCLID:      ${gclid}`,
+                  `Campaign:   ${campaign}`,
+                  `Ad Group:   ${adGroup}`,
+                  `Click Date: ${date}`,
+                  `Network:    ${network}`,
+                ].join('\n'),
+              }],
+            }
           }
         }
-
-        const row      = rows[0]
-        const campaign = String(pick(row, 'campaign.name')          ?? 'Unknown')
-        const adGroup  = String(pick(row, 'adGroup.name')           ?? 'Unknown')
-        const date     = String(pick(row, 'segments.date')          ?? 'Unknown')
-        const network  = String(pick(row, 'segments.adNetworkType') ?? 'Unknown')
 
         return {
           content: [{
             type: 'text' as const,
-            text: [
-              `GCLID Found ✓`,
-              divider(),
-              `GCLID:      ${gclid}`,
-              `Campaign:   ${campaign}`,
-              `Ad Group:   ${adGroup}`,
-              `Click Date: ${date}`,
-              `Network:    ${network}`,
-            ].join('\n'),
+            text: `GCLID not found: ${gclid}\n\nNot registered in the last ${days} days. It may be older, invalid, or the click was filtered by Google.`,
           }],
         }
       }
